@@ -1,0 +1,4 @@
+interface:
+  display_name: "可视化 SOP 制作"
+  short_description: "将操作截图制作成带打码、标注和联动目录的单文件 SOP"
+  default_prompt: "使用 $build-visual-sop 将这些编号截图和文字步骤制作成完成打码、操作标注、图片内嵌及滚动目录联动的单文件 SOP 网页。"
