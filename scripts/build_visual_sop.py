@@ -5,6 +5,7 @@ import base64
 import html
 import io
 import json
+import os
 import re
 from pathlib import Path
 
@@ -21,16 +22,18 @@ WHITE = "#FFFFFF"
 
 def find_font(bold: bool = False) -> Path:
     candidates = [
+        Path(os.environ["SOP_FONT"]) if os.environ.get("SOP_FONT") else Path("__missing_font__"),
+        Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("/System/Library/Fonts/STHeiti Light.ttc"),
         Path(r"C:\Windows\Fonts\msyhbd.ttc") if bold else Path(r"C:\Windows\Fonts\msyh.ttc"),
         Path(r"C:\Windows\Fonts\simhei.ttf"),
         Path(r"C:\Windows\Fonts\simsun.ttc"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc") if bold else Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf") if bold else Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
     ]
     for path in candidates:
         if path.exists():
             return path
-    raise FileNotFoundError("No usable font found")
+    raise FileNotFoundError("No CJK font found. Install Noto Sans CJK or set SOP_FONT to a CJK .ttf/.ttc file.")
 
 
 REGULAR = find_font(False)
@@ -42,7 +45,7 @@ def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
 
 
 def box(value: list[int], image: Image.Image) -> tuple[int, int, int, int]:
-    if len(value) != 4:
+    if not isinstance(value, list) or len(value) != 4 or any(type(v) is not int for v in value):
         raise ValueError(f"Box must have four integers: {value}")
     x1, y1, x2, y2 = map(int, value)
     if not (0 <= x1 < x2 <= image.width and 0 <= y1 < y2 <= image.height):
@@ -62,7 +65,7 @@ def fitted_font(draw: ImageDraw.ImageDraw, text: str, width: int, start: int = 3
 def redact(image: Image.Image, coords: tuple[int, int, int, int], label: str) -> None:
     draw = ImageDraw.Draw(image)
     x1, y1, x2, y2 = coords
-    draw.rounded_rectangle(coords, radius=22, fill=MASK, outline="#525866", width=3)
+    draw.rectangle(coords, fill=MASK, outline="#525866", width=3)  # Cover corners too; no original pixels survive.
     for offset in range(-(y2 - y1), x2 - x1 + y2 - y1, 38):
         points = []
         for x in range(x1, x2 + 1, 4):
@@ -92,11 +95,16 @@ def action(image: Image.Image, item: dict) -> None:
     coords = box(item["box"], image)
     x1, y1, x2, y2 = coords
     draw.rounded_rectangle(coords, radius=22, outline=RED, width=9)
-    radius = 35
-    cx, cy = x1 + radius, y1 + radius
+    radius = 24
+    if x1 >= 58:
+        cx, cy = x1 - 30, (y1 + y2) // 2
+    elif x2 + 58 <= image.width:
+        cx, cy = x2 + 30, (y1 + y2) // 2
+    else:
+        cx, cy = x1 + 30, max(26, y1 - 30)
     draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), fill=RED, outline=WHITE, width=4)
     number = str(item.get("number", ""))
-    fnt = font(34 if len(number) == 1 else 28, True)
+    fnt = font(26 if len(number) == 1 else 20, True)
     bounds = draw.textbbox((0, 0), number, font=fnt)
     draw.text((cx - (bounds[2] - bounds[0]) / 2, cy - (bounds[3] - bounds[1]) / 2 - 3), number, font=fnt, fill=WHITE)
     label_y = y1 - 74 if y1 >= 95 else y2 + 18
@@ -115,7 +123,9 @@ def process(step: dict, base: Path, max_width: int, quality: int) -> tuple[str, 
     source = Path(step["source"])
     if not source.is_absolute():
         source = base / source
-    image = Image.open(source).convert("RGB")
+    with Image.open(source) as original:
+        image = original.convert("RGB")
+    image.info.clear()  # Do not carry EXIF, comments or source metadata into output.
     redaction_count = 0
     for item in step.get("redactions", []):
         redact(image, box(item["box"], image), item.get("label", "隐私信息已隐藏"))
@@ -138,11 +148,26 @@ def safe_id(value: str, fallback: str) -> str:
 
 
 def build(manifest: dict, base: Path, max_width: int, quality: int) -> tuple[str, dict]:
+    if not isinstance(manifest.get("title"), str) or not manifest["title"].strip():
+        raise ValueError("Nonempty title required")
+    if not isinstance(manifest.get("sections"), list) or not manifest["sections"]:
+        raise ValueError("At least one section required")
+    if max_width < 100 or not 1 <= quality <= 100:
+        raise ValueError("max-width must be >=100 and quality in 1..100")
+    ids = [section.get("id", f"sop{i}") for i, section in enumerate(manifest["sections"], 1)]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Duplicate section id")
+    for section in manifest["sections"]:
+        if not section.get("title") or not section.get("steps"):
+            raise ValueError("Each section needs title and nonempty steps")
+        for step in section["steps"]:
+            if not step.get("source") or not step.get("title"):
+                raise ValueError("Each step needs source and title")
     sections_html, nav_html = [], []
     step_count = image_count = redaction_count = 0
     section_ids: set[str] = set()
     for s_index, section in enumerate(manifest["sections"], start=1):
-        section_id = safe_id(section.get("id", f"sop{s_index}"), f"sop{s_index}")
+        section_id = f"section-{s_index}-" + safe_id(section.get("id", f"sop{s_index}"), f"sop{s_index}")
         if section_id in section_ids:
             raise ValueError(f"Duplicate section id: {section_id}")
         section_ids.add(section_id)
@@ -167,15 +192,17 @@ def build(manifest: dict, base: Path, max_width: int, quality: int) -> tuple[str
     subtitle = manifest.get("subtitle", "图示操作指南")
     section_count = len(manifest["sections"])
     css = '''
-:root{--blue:#155eef;--ink:#101828;--muted:#475467;--bg:#f4f7fb;--green:#12b76a}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;line-height:1.7}.hero{padding:72px 24px;background:linear-gradient(135deg,#fff,#dce9ff);border-bottom:1px solid #cbdcfb}.hero-inner{max-width:1160px;margin:auto}.kicker{display:inline-block;padding:7px 13px;border:1px solid #b8cdf8;border-radius:999px;background:#fff9;color:var(--blue);font-weight:800}.hero h1{margin:22px 0 12px;font-size:clamp(40px,6vw,72px);line-height:1.08;letter-spacing:-.04em}.hero p{max-width:800px;margin:0;color:var(--muted);font-size:18px}.stats{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}.stat{padding:10px 14px;border:1px solid #d7e2f6;border-radius:14px;background:#fff}.stat b{color:var(--blue)}.layout{max-width:1320px;margin:auto;padding:48px 24px 90px;display:grid;grid-template-columns:280px minmax(0,1fr);gap:30px;align-items:start}.side{position:sticky;top:18px;max-height:calc(100vh - 36px);overflow:auto;padding:18px;border:1px solid #e4e7ec;border-radius:20px;background:#fff;box-shadow:0 12px 36px #1018280a}.side h2{margin:0 0 12px;font-size:15px}.nav-group{padding:6px 0 14px;border-bottom:1px solid #eaecf0}.side a{display:flex;gap:9px;padding:8px;border-radius:10px;color:#667085;text-decoration:none;font-size:12px;line-height:1.4;transition:.18s}.side a span{min-width:26px;color:var(--blue);font-weight:800}.side .nav-title{color:#344054;font-weight:800}.side a.active{background:var(--blue);color:#fff;box-shadow:0 6px 18px #155eef38}.side a.active span{color:#fff}.side .nav-title.section-active{background:#eaf1ff;color:var(--blue)}.privacy-note{margin-top:14px;padding:12px;border:1px solid #eaecf0;border-radius:12px;background:#f9fafb;color:#667085;font-size:12px}.content{min-width:0}.sop-head{position:relative;display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px 18px;margin:34px 0 22px;padding:28px 100px 28px 28px;border:1px solid #c9d9f8;border-radius:24px;background:linear-gradient(135deg,#fff,#edf4ff);scroll-margin-top:18px}.sop-number{align-self:start;padding:7px 12px;border-radius:999px;background:var(--blue);color:#fff;font-size:12px;font-weight:800}.sop-head h2{margin:0;font-size:30px}.sop-head p{grid-column:2;margin:0;color:#475467}.outcome{grid-column:2;padding:12px 14px;border:1px solid #abefc6;border-radius:13px;background:#ecfdf3;color:#067647;font-size:13px}.outcome span{display:block;font-weight:800}.step-count{position:absolute;right:25px;top:27px;color:var(--blue);font-size:38px;font-weight:900}.step-count small{display:block;color:#667085;font-size:11px;text-align:center}.step-card{display:grid;grid-template-columns:minmax(260px,.7fr) minmax(390px,1fr);gap:22px;margin-bottom:24px;padding:22px;border:1px solid #e4e7ec;border-radius:24px;background:#fff;box-shadow:0 14px 42px #1018280b;scroll-margin-top:18px}.step-copy{padding:12px 8px}.eyebrow{color:var(--blue);font-size:13px;font-weight:800}.step-copy h3{margin:10px 0 13px;font-size:26px;line-height:1.25}.step-copy p{margin:0;color:#475467}.check{display:flex;gap:11px;margin-top:22px;padding:14px;border:1px solid #abefc6;border-radius:15px;background:#ecfdf3;color:#067647;font-size:13px}.check>span{display:grid;place-items:center;flex:0 0 28px;height:28px;border-radius:50%;background:var(--green);color:#fff;font-weight:900}.shot{position:relative;width:100%;padding:0;overflow:hidden;border:0;border-radius:18px;background:#07090d;cursor:zoom-in}.shot img{display:block;width:100%;max-height:820px;object-fit:contain;margin:auto}.zoom{position:absolute;right:12px;bottom:12px;padding:7px 10px;border-radius:999px;background:#fff;color:#344054;font:700 12px "Microsoft YaHei",sans-serif}.lightbox{position:fixed;z-index:50;inset:0;display:none;align-items:center;justify-content:center;padding:30px;background:#101828e8}.lightbox.open{display:flex}.lightbox img{max-width:96vw;max-height:94vh;object-fit:contain}.close{position:fixed;right:22px;top:18px;width:44px;height:44px;border:0;border-radius:50%;background:#fff;font-size:26px}@media(max-width:920px){.layout{display:block;padding:28px 14px 70px}.side{position:relative;max-height:none;margin-bottom:22px}.step-card{grid-template-columns:1fr;padding:16px}.shot img{max-height:none}.sop-head{padding-right:28px}.step-count{position:static;grid-column:1/3;font-size:20px}.step-count small{display:inline;margin-left:5px}}'''
+:root{--blue:#155eef;--ink:#101828;--muted:#475467;--bg:#f4f7fb;--green:#12b76a}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;line-height:1.7}.hero{padding:72px 24px;background:linear-gradient(135deg,#fff,#dce9ff);border-bottom:1px solid #cbdcfb}.hero-inner{max-width:1160px;margin:auto}.kicker{display:inline-block;padding:7px 13px;border:1px solid #b8cdf8;border-radius:999px;background:#fff9;color:var(--blue);font-weight:800}.hero h1{margin:22px 0 12px;font-size:clamp(40px,6vw,72px);line-height:1.08;letter-spacing:-.04em}.hero p{max-width:800px;margin:0;color:var(--muted);font-size:18px}.stats{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}.stat{padding:10px 14px;border:1px solid #d7e2f6;border-radius:14px;background:#fff}.stat b{color:var(--blue)}.layout{max-width:1320px;margin:auto;padding:48px 24px 90px;display:grid;grid-template-columns:280px minmax(0,1fr);gap:30px;align-items:start}.side{position:sticky;top:18px;max-height:calc(100vh - 36px);overflow:auto;padding:18px;border:1px solid #e4e7ec;border-radius:20px;background:#fff;box-shadow:0 12px 36px #1018280a}.side h2{margin:0 0 12px;font-size:15px}.nav-group{padding:6px 0 14px;border-bottom:1px solid #eaecf0}.side a{display:flex;gap:9px;padding:8px;border-radius:10px;color:#667085;text-decoration:none;font-size:12px;line-height:1.4;transition:.18s}.side a span{min-width:26px;color:var(--blue);font-weight:800}.side .nav-title{color:#344054;font-weight:800}.side a.active{background:var(--blue);color:#fff;box-shadow:0 6px 18px #155eef38}.side a.active span{color:#fff}.side .nav-title.section-active{background:#eaf1ff;color:var(--blue)}.privacy-note{margin-top:14px;padding:12px;border:1px solid #eaecf0;border-radius:12px;background:#f9fafb;color:#667085;font-size:12px}.content{min-width:0}.sop-head{position:relative;display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px 18px;margin:34px 0 22px;padding:28px 100px 28px 28px;border:1px solid #c9d9f8;border-radius:24px;background:linear-gradient(135deg,#fff,#edf4ff);scroll-margin-top:18px}.sop-number{align-self:start;padding:7px 12px;border-radius:999px;background:var(--blue);color:#fff;font-size:12px;font-weight:800}.sop-head h2{margin:0;font-size:30px}.sop-head p{grid-column:2;margin:0;color:#475467}.outcome{grid-column:2;padding:12px 14px;border:1px solid #abefc6;border-radius:13px;background:#ecfdf3;color:#067647;font-size:13px}.outcome span{display:block;font-weight:800}.step-count{position:absolute;right:25px;top:27px;color:var(--blue);font-size:38px;font-weight:900}.step-count small{display:block;color:#667085;font-size:11px;text-align:center}.step-card{display:grid;grid-template-columns:minmax(260px,.7fr) minmax(390px,1fr);gap:22px;margin-bottom:24px;padding:22px;border:1px solid #e4e7ec;border-radius:24px;background:#fff;box-shadow:0 14px 42px #1018280b;scroll-margin-top:18px}.step-copy{padding:12px 8px}.eyebrow{color:var(--blue);font-size:13px;font-weight:800}.step-copy h3{margin:10px 0 13px;font-size:26px;line-height:1.25}.step-copy p{margin:0;color:#475467}.check{display:flex;gap:11px;margin-top:22px;padding:14px;border:1px solid #abefc6;border-radius:15px;background:#ecfdf3;color:#067647;font-size:13px}.check>span{display:grid;place-items:center;flex:0 0 28px;height:28px;border-radius:50%;background:var(--green);color:#fff;font-weight:900}.shot{position:relative;width:100%;padding:0;overflow:hidden;border:0;border-radius:18px;background:#07090d;cursor:zoom-in}.shot img{display:block;width:100%;max-height:820px;object-fit:contain;margin:auto}.zoom{position:absolute;right:12px;bottom:12px;padding:7px 10px;border-radius:999px;background:#fff;color:#344054;font:700 12px "Microsoft YaHei",sans-serif}.lightbox{position:fixed;z-index:50;inset:0;display:none;align-items:center;justify-content:center;padding:30px;background:#101828e8}.lightbox[open]{display:flex}.lightbox{width:100vw;height:100vh;max-width:none;max-height:none;border:0;margin:0}.lightbox::backdrop{background:#101828e8}:focus-visible{outline:3px solid #155eef;outline-offset:4px}.lightbox img{max-width:96vw;max-height:94vh;object-fit:contain}.close{position:fixed;right:22px;top:18px;width:44px;height:44px;border:0;border-radius:50%;background:#fff;font-size:26px}@media(max-width:920px){.layout{display:block;padding:28px 14px 70px}.side{position:relative;max-height:none;margin-bottom:22px}.step-card{grid-template-columns:1fr;padding:16px}.shot img{max-height:none}.sop-head{padding-right:28px}.step-count{position:static;grid-column:1/3;font-size:20px}.step-count small{display:inline;margin-left:5px}}'''
+    css += """@media print{@page{size:A4;margin:12mm}html{scroll-behavior:auto}body{background:#fff}.hero{padding:20px}.hero h1{font-size:28px}.side,.zoom,.lightbox{display:none!important}.layout{display:block;padding:0}.step-card{display:block;break-inside:avoid;box-shadow:none;margin:12px 0;padding:12px}.step-copy{padding:0}.step-copy h3{font-size:20px}.check{margin:8px 0}.shot{background:#fff}.shot img{max-height:155mm;width:auto;max-width:100%}.sop-head{break-after:avoid;margin:12px 0;padding:16px}.sop-head h2{font-size:24px}}"""
     script = '''
-function openLightbox(btn){const b=document.getElementById('lightbox');document.getElementById('lightboxImg').src=btn.querySelector('img').src;b.classList.add('open');document.body.style.overflow='hidden'}
-function closeLightbox(){document.getElementById('lightbox').classList.remove('open');document.body.style.overflow=''}
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeLightbox()});
+let returnFocus=null;
+function openLightbox(btn){const b=document.getElementById('lightbox');returnFocus=btn;const img=document.getElementById('lightboxImg');img.src=btn.querySelector('img').src;img.alt=btn.querySelector('img').alt;b.showModal();document.body.style.overflow='hidden';b.querySelector('button').focus()}
+function closeLightbox(){document.getElementById('lightbox').close()}
+const dialog=document.getElementById('lightbox');dialog.addEventListener('click',e=>{if(e.target===dialog)closeLightbox()});dialog.addEventListener('close',()=>{document.body.style.overflow='';returnFocus?.focus()});
 const side=document.querySelector('.side');const steps=[...document.querySelectorAll('.step-card')];const links=[...document.querySelectorAll('.step-link')];let ticking=false;
 function setActive(){ticking=false;if(!steps.length)return;const line=innerHeight*.32;let current=steps[0];for(const item of steps){if(item.getBoundingClientRect().top<=line)current=item;else break}if(innerHeight+scrollY>=document.documentElement.scrollHeight-4)current=steps[steps.length-1];const id=current.id;const section=current.dataset.section;let active=null;for(const link of links){const on=link.getAttribute('href')==='#'+id;link.classList.toggle('active',on);if(on){link.setAttribute('aria-current','step');active=link}else link.removeAttribute('aria-current')}document.querySelectorAll('.nav-title').forEach(link=>link.classList.toggle('section-active',link.closest('.nav-group')?.dataset.section===section));if(active&&side){const top=active.offsetTop;const low=side.scrollTop+48;const high=side.scrollTop+side.clientHeight-active.offsetHeight-48;if(top<low)side.scrollTop=Math.max(0,top-70);else if(top>high)side.scrollTop=top-side.clientHeight+active.offsetHeight+70}}
-function requestActive(){if(!ticking){ticking=true;requestAnimationFrame(setActive)}}addEventListener('scroll',requestActive,{passive:true});addEventListener('resize',requestActive);addEventListener('hashchange',()=>setTimeout(setActive,80));setActive();'''
-    document = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>{html.escape(title)}｜完整 SOP</title><style>{css}</style></head><body><header class="hero"><div class="hero-inner"><div class="kicker">完整可视化 SOP</div><h1>{html.escape(title)}</h1><p>{html.escape(subtitle)}</p><div class="stats"><div class="stat"><b>{section_count}</b> 个 SOP</div><div class="stat"><b>{step_count}</b> 个图示步骤</div><div class="stat">图片已内嵌，可离线查看</div><div class="stat">目录自动高亮当前位置</div></div></div></header><main class="layout"><aside class="side"><h2>完整目录</h2><nav>{''.join(nav_html)}</nav><div class="privacy-note">红色＝操作位置<br>绿色＝完成结果<br>斜纹＝隐私信息已隐藏</div></aside><div class="content">{''.join(sections_html)}</div></main><div class="lightbox" id="lightbox" onclick="closeLightbox()"><button class="close" aria-label="关闭">×</button><img id="lightboxImg" alt="步骤大图"></div><script>{script}</script></body></html>'''
+function requestActive(){if(!ticking){ticking=true;requestAnimationFrame(setActive)}}addEventListener('scroll',requestActive,{passive:true});addEventListener('resize',requestActive);addEventListener('hashchange',()=>setTimeout(setActive,80));addEventListener('load',requestActive);setActive();'''
+    document = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>{html.escape(title)}｜完整 SOP</title><style>{css}</style></head><body><header class="hero"><div class="hero-inner"><div class="kicker">完整可视化 SOP</div><h1>{html.escape(title)}</h1><p>{html.escape(subtitle)}</p><div class="stats"><div class="stat"><b>{section_count}</b> 个 SOP</div><div class="stat"><b>{step_count}</b> 个图示步骤</div><div class="stat">图片已内嵌，可离线查看</div><div class="stat">目录自动高亮当前位置</div></div></div></header><main class="layout"><aside class="side"><h2>完整目录</h2><nav>{''.join(nav_html)}</nav><div class="privacy-note">红色＝操作位置<br>绿色＝完成结果<br>斜纹＝隐私信息已隐藏</div></aside><div class="content">{''.join(sections_html)}</div></main><dialog class="lightbox" id="lightbox" aria-label="步骤大图"><button class="close" aria-label="关闭" onclick="closeLightbox()">×</button><img id="lightboxImg" alt="步骤大图"></dialog><script>{script}</script></body></html>'''
     return document, {"sections": section_count, "steps": step_count, "images": image_count, "redactions": redaction_count}
 
 
@@ -189,6 +216,12 @@ def main() -> None:
     manifest_path = args.manifest.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     output = args.output or manifest_path.parent / manifest.get("output_name", "visual-SOP.html")
+    protected = {manifest_path}
+    for section in manifest.get("sections", []):
+        for step in section.get("steps", []):
+            protected.add((manifest_path.parent / step["source"]).resolve())
+    if output.resolve() in protected:
+        raise ValueError("Output must not overwrite manifest or source images")
     document, stats = build(manifest, manifest_path.parent, args.max_width, args.quality)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(document, encoding="utf-8")

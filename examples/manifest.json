@@ -1,0 +1,99 @@
+{
+  "title": "合成界面操作示例",
+  "subtitle": "仅用于验证构建、脱敏与离线浏览；不是实际产品教程。",
+  "sections": [
+    {
+      "id": "settings",
+      "title": "设置通知",
+      "outcome": "通知已开启并保存。",
+      "steps": [
+        {
+          "source": "step-1.png",
+          "title": "打开设置",
+          "instruction": "点击设置按钮。",
+          "check": "进入设置页面。",
+          "redactions": [
+            {
+              "box": [
+                40,
+                200,
+                720,
+                350
+              ],
+              "label": "测试身份已隐藏"
+            }
+          ],
+          "actions": [
+            {
+              "number": 1,
+              "box": [
+                60,
+                490,
+                700,
+                590
+              ],
+              "label": "打开设置"
+            }
+          ]
+        },
+        {
+          "source": "step-2.png",
+          "title": "开启通知",
+          "instruction": "点击通知开关。",
+          "check": "开关显示开启。",
+          "redactions": [
+            {
+              "box": [
+                40,
+                200,
+                720,
+                350
+              ],
+              "label": "测试身份已隐藏"
+            }
+          ],
+          "actions": [
+            {
+              "number": 2,
+              "box": [
+                60,
+                490,
+                700,
+                590
+              ],
+              "label": "开启通知"
+            }
+          ]
+        },
+        {
+          "source": "step-3.png",
+          "title": "确认保存",
+          "instruction": "检查保存结果。",
+          "check": "页面显示保存完成。",
+          "redactions": [
+            {
+              "box": [
+                40,
+                200,
+                720,
+                350
+              ],
+              "label": "测试身份已隐藏"
+            }
+          ],
+          "highlights": [
+            {
+              "box": [
+                60,
+                490,
+                700,
+                590
+              ],
+              "label": "已完成"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

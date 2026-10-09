@@ -3,7 +3,7 @@
 ## Decision order
 
 1. Identify user-approved information that may remain visible.
-2. Treat everything else as private by default when it identifies a person, account, conversation, organization, or access credential.
+2. Treat unapproved personal identifiers, private accounts, conversations, internal organizations and access credentials as private. Public branding or non-sensitive UI needed to explain the operation may remain visible.
 3. Redact before resizing, compression, annotation, or Base64 embedding.
 4. Re-open the processed image and verify that no original pixels remain visible.
 
@@ -18,7 +18,7 @@
 
 ## Redaction method
 
-- Draw an opaque dark rounded rectangle over the full sensitive area.
+- Draw an opaque dark rectangle over the entire sensitive area, including all four corners. Do not use rounded corners that retain source pixels.
 - Add diagonal stripes and a neutral label such as `联系人列表已隐藏` when useful.
 - Expand the box slightly beyond text or image edges to prevent halos.
 - For a list, mask the whole data column rather than many narrow text fragments. Preserve action buttons only when they are necessary to explain the step.
@@ -38,3 +38,4 @@
 - Confirm that the final HTML contains only processed images.
 - Search the HTML for sensitive literal strings when the user named them.
 - Count redactions from the manifest and report the result.
+
